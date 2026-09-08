@@ -145,6 +145,7 @@
     if (step === "cart") body.innerHTML = cartStepHTML();
     else if (step === "details") body.innerHTML = detailsStepHTML();
     else if (step === "locating") body.innerHTML = locatingStepHTML();
+    else if (step === "low-accuracy") body.innerHTML = lowAccuracyStepHTML();
     else if (step === "too-far") body.innerHTML = tooFarStepHTML();
     else if (step === "review") body.innerHTML = reviewStepHTML();
     else if (step === "done") body.innerHTML = doneStepHTML();
@@ -219,18 +220,32 @@
     return `
       <div class="drawer-empty">
         <div class="drawer-empty-icon">📍</div>
-        <p>Checking your location — please allow location access if your browser asks.</p>
+        <p>Checking your location — please allow location access if your browser asks. For the most accurate result, make sure GPS is turned on.</p>
+      </div>`;
+  }
+
+  function lowAccuracyStepHTML() {
+    const acc = deliveryLocation ? Math.round(deliveryLocation.accuracy) : "?";
+    return `
+      <button class="drawer-back" data-action="back-to-details">← Back</button>
+      <div class="drawer-empty">
+        <div class="drawer-empty-icon">📡</div>
+        <p class="too-far-msg">Your location isn't precise enough to confirm delivery.</p>
+        <p class="dform-note">Your device reported a location accurate to only about ${acc}m — that's too rough to reliably check our ${CONFIG.DELIVERY_RADIUS_KM} KM zone. This usually happens with Wi-Fi/IP-based location instead of real GPS.</p>
+        <p class="dform-note"><b>Try this:</b> turn on GPS/Location Services, step outdoors or near a window, and make sure your browser has "Precise Location" enabled — then try again.</p>
+        <button class="btn btn-primary" style="margin-top:10px" data-action="check-location">Try Again</button>
       </div>`;
   }
 
   function tooFarStepHTML() {
     const dist = deliveryLocation ? deliveryLocation.distanceKm.toFixed(2) : "?";
+    const acc = deliveryLocation && deliveryLocation.accuracy != null ? Math.round(deliveryLocation.accuracy) : null;
     return `
       <button class="drawer-back" data-action="back-to-details">← Back</button>
       <div class="drawer-empty">
         <div class="drawer-empty-icon">😔</div>
         <p class="too-far-msg">Sorry! Home delivery is currently available only within ${CONFIG.DELIVERY_RADIUS_KM} KM of our restaurant.</p>
-        <p class="dform-note">You're about ${dist} KM away. You're welcome to call us to arrange pickup or delivery some other way.</p>
+        <p class="dform-note">You're about ${dist} KM away${acc ? ` (accurate to ±${acc}m)` : ""}. You're welcome to call us to arrange pickup or delivery some other way.</p>
         <a class="btn btn-outline" href="tel:${CONFIG.PHONE_1}" style="display:block; text-align:center;">Call ${CONFIG.PHONE_1}</a>
         <button class="btn btn-primary" style="margin-top:10px" data-action="check-location">Try Again</button>
       </div>`;
@@ -243,6 +258,7 @@
       <div class="review-line"><span>${l.qty} × ${l.name} (${l.variant})</span><span>₹${l.qty * l.price}</span></div>
     `).join("");
     const dist = deliveryLocation ? deliveryLocation.distanceKm.toFixed(2) : "—";
+    const acc = deliveryLocation && deliveryLocation.accuracy != null ? Math.round(deliveryLocation.accuracy) : null;
     return `
       <button class="drawer-back" data-action="back-to-details">← Back</button>
       <h3 class="drawer-h">Review Your Order</h3>
@@ -256,7 +272,7 @@
         <div class="review-detail"><b>${d.name}</b></div>
         <div class="review-detail">${d.phone}</div>
         <div class="review-detail">${d.address}${d.landmark ? " (Landmark: " + d.landmark + ")" : ""}</div>
-        <div class="review-detail review-distance">✓ ${dist} KM from restaurant — within delivery zone</div>
+        <div class="review-detail review-distance">✓ ${dist} KM from restaurant — within delivery zone${acc ? ` (±${acc}m accuracy)` : ""}</div>
       </div>
       <button class="btn btn-primary drawer-cta" data-action="place-order">Place Order</button>`;
   }
@@ -339,21 +355,34 @@
       (pos) => {
         const lat = pos.coords.latitude;
         const lng = pos.coords.longitude;
+        const accuracy = pos.coords.accuracy; // meters, per browser's own confidence radius
         const dist = distanceKm(CONFIG.RESTAURANT_LAT, CONFIG.RESTAURANT_LNG, lat, lng);
-        deliveryLocation = { lat, lng, distanceKm: dist };
-        if (dist <= CONFIG.DELIVERY_RADIUS_KM) {
+        deliveryLocation = { lat, lng, distanceKm: dist, accuracy };
+
+        // If the browser itself says its fix could be off by more than 1km,
+        // the 2km check isn't trustworthy either way — don't act on it, ask
+        // for a better reading instead (this is the #1 real-world cause of
+        // "wrong" distances: WiFi/IP-based positioning instead of true GPS,
+        // common on laptops or with "approximate location" permissions).
+        if (accuracy != null && accuracy > 1000) {
+          step = "low-accuracy";
+        } else if (dist <= CONFIG.DELIVERY_RADIUS_KM) {
           step = "review";
         } else {
           step = "too-far";
         }
         renderDrawer();
       },
-      () => {
+      (err) => {
         step = "details";
         renderDrawer();
-        alert("We couldn't access your location. Please allow location access in your browser to verify you're within our delivery zone — this is required before we can confirm your delivery.");
+        const msg =
+          err && err.code === 1
+            ? "Location access was denied. Please allow location access in your browser's site settings, then try again — this is required before we can confirm your delivery."
+            : "We couldn't get a clear location fix. Please make sure GPS/location is turned on and try again, ideally outdoors or near a window.";
+        alert(msg);
       },
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   }
 
@@ -379,7 +408,7 @@
       `Name: ${d.name}`,
       `Phone: ${d.phone}`,
       `Address: ${d.address}${d.landmark ? " (Landmark: " + d.landmark + ")" : ""}`,
-      `Distance: ${deliveryLocation ? deliveryLocation.distanceKm.toFixed(2) : "—"} KM from restaurant`,
+      `Distance: ${deliveryLocation ? deliveryLocation.distanceKm.toFixed(2) : "—"} KM from restaurant${deliveryLocation && deliveryLocation.accuracy != null ? ` (±${Math.round(deliveryLocation.accuracy)}m accuracy)` : ""}`,
       `Placed: ${placedAt}`,
     ];
     const waNumber = (CONFIG.WHATSAPP_ORDER_NUMBER || CONFIG.PHONE_1 || "").replace(/\D/g, "");
@@ -394,6 +423,7 @@
       address: d.address,
       landmark: d.landmark,
       distanceKm: deliveryLocation ? Number(deliveryLocation.distanceKm.toFixed(2)) : null,
+      locationAccuracyM: deliveryLocation && deliveryLocation.accuracy != null ? Math.round(deliveryLocation.accuracy) : null,
       placedAt,
       placedAtISO: new Date().toISOString(),
       status: "New",
